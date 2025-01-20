@@ -55,6 +55,32 @@ class RpcGet(object):
         else:
             return 0
 
+    def list_channels(self):
+        channels_data = self.call("list_channels", [{}])  # 获取通道数据
+        if 'channels' in channels_data:
+            channels_by_peer_id = {}  # 创建字典以根据 peer_id 分组
+            for channel in channels_data['channels']:
+                # 检查通道状态是否为 CHANNEL_READY
+                if channel['state']['state_name'] == "CHANNEL_READY":
+                    peer_id = channel['peer_id']  # 获取当前通道的 peer_id
+                    if peer_id not in channels_by_peer_id:
+                        channels_by_peer_id[peer_id] = {
+                            'all_local_balance': 0,  # 初始化所有本地余额的和
+                            'all_remote_balance': 0  # 初始化所有远程余额的和
+                        }
+                    # 将十六进制的余额转换为整数并累加
+                    channels_by_peer_id[peer_id]['all_local_balance'] += int(channel['local_balance'], 16)
+                    channels_by_peer_id[peer_id]['all_remote_balance'] += int(channel['remote_balance'], 16)
+
+            # 在返回之前将所有余额除以 100000000 并格式化输出为浮点数，保留 8 位小数
+            for peer_id, balances in channels_by_peer_id.items():
+                balances['all_local_balance'] = "{:.8f}".format(balances['all_local_balance'] / 100000000.0)
+                balances['all_remote_balance'] = "{:.8f}".format(balances['all_remote_balance'] / 100000000.0)
+
+            return channels_by_peer_id
+        else:
+            return {}  # 如果没有通道数据，返回一个空字典
+
     def call(self, method, params):
         headers = {'content-type': 'application/json'}
         data = {
@@ -113,6 +139,29 @@ def Node_Get():
     peers_count_gauge.set(peers_count)
     channel_count = get_result.get_channel_count()
     channel_count_gauge.set(channel_count)
+
+    channels_grouped_by_peer_id = get_result.list_channels()
+    gauges_local = {}
+    gauges_remote = {}
+
+    for peer_id, balances in channels_grouped_by_peer_id.items():
+        # 为每个 peer_id 创建或更新 Gauge
+        if peer_id not in gauges_local:
+            gauges_local[peer_id] = Gauge(
+                f"peer_{peer_id}_local_balance",
+                "Total local balance",
+                registry=FIBER
+            )
+        if peer_id not in gauges_remote:
+            gauges_remote[peer_id] = Gauge(
+                f"peer_{peer_id}_remote_balance",
+                "Total remote balance",
+                registry=FIBER
+            )
+
+        # 设置 Gauge 的值
+        gauges_local[peer_id].set(balances['all_local_balance'])
+        gauges_remote[peer_id].set(balances['all_remote_balance'])
 
     return Response(prometheus_client.generate_latest(FIBER), mimetype="text/plain")
 

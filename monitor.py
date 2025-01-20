@@ -4,12 +4,23 @@ import prometheus_client
 from prometheus_client import Gauge
 from prometheus_client.core import CollectorRegistry
 from flask import Response, Flask
+import sys  # 导入 sys 用于读取命令行参数
 
 NodeFlask = Flask(__name__)
-fiber_urls = [
-    "http://18.162.235.225:8227",
-    "http://18.163.221.211:8227"
-]
+
+# 默认 URL
+default_url = "http://127.0.0.1:8227"
+# 使用命令行参数或默认 URL
+fiber_url = sys.argv[1] if len(sys.argv) > 1 else default_url
+
+
+def convert_int(value):
+    try:
+        return int(value)
+    except ValueError:
+        return int(value, base=16)
+    except Exception as exp:
+        raise exp
 
 
 class RpcGet(object):
@@ -27,6 +38,20 @@ class RpcGet(object):
         nodes_data = self.call("graph_nodes", [{}])
         if nodes_data and 'nodes' in nodes_data:
             return len(nodes_data['nodes'])
+        else:
+            return 0
+
+    def get_peers_count(self):
+        node_info = self.call("node_info", [{}])
+        if node_info and 'peers_count' in node_info:
+            return convert_int(node_info['peers_count'])
+        else:
+            return 0
+
+    def get_channel_count(self):
+        node_info = self.call("node_info", [{}])
+        if node_info and 'channel_count' in node_info:
+            return convert_int(node_info['channel_count'])
         else:
             return 0
 
@@ -48,29 +73,46 @@ class RpcGet(object):
 @NodeFlask.route("/metrics")
 def Node_Get():
     FIBER = CollectorRegistry(auto_describe=False)
-    for index, url in enumerate(fiber_urls):
-        # Gauge for channels
-        channels_gauge = Gauge(
-            f"graph_channels_length_{index}",
-            f"Graph channels length from {url}",
-            [],
-            registry=FIBER
-        )
-        # Gauge for nodes
-        nodes_gauge = Gauge(
-            f"graph_nodes_count_{index}",
-            f"Graph nodes count from {url}",
-            [],
-            registry=FIBER
-        )
+    # Gauge for channels
+    channels_gauge = Gauge(
+        "graph_channels_count",
+        "graph_channels count",
+        [],
+        registry=FIBER
+    )
+    # Gauge for nodes
+    nodes_gauge = Gauge(
+        "graph_nodes_count",
+        "graph_nodes count",
+        [],
+        registry=FIBER
+    )
+    peers_count_gauge = Gauge(
+        "node_info_peers_count",
+        "node_info peers_count",
+        [],
+        registry=FIBER
+    )
+    channel_count_gauge = Gauge(
+        "node_info_channel_count",
+        "node_info channel_count",
+        [],
+        registry=FIBER
+    )
 
-        get_result = RpcGet(url)
-        # Set channel count
-        graph_channels_length = get_result.count_channels()
-        channels_gauge.set(graph_channels_length)
-        # Set node count
-        graph_nodes_count = get_result.count_nodes()
-        nodes_gauge.set(graph_nodes_count)
+    get_result = RpcGet(fiber_url)
+
+    # Set the countber of channels
+    graph_channels_count = get_result.count_channels()
+    channels_gauge.set(graph_channels_count)
+    # Set the countber of nodes
+    graph_nodes_count = get_result.count_nodes()
+    nodes_gauge.set(graph_nodes_count)
+
+    peers_count = get_result.get_peers_count()
+    peers_count_gauge.set(peers_count)
+    channel_count = get_result.get_channel_count()
+    channel_count_gauge.set(channel_count)
 
     return Response(prometheus_client.generate_latest(FIBER), mimetype="text/plain")
 

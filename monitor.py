@@ -99,8 +99,8 @@ def Node_Get():
         remote_balance = convert_int(channel['remote_balance'])
 
         # 定义唯一的标识符
-        local_gauge_name = f"{peer_id}_{channel_id}_local_balance"
-        remote_gauge_name = f"{peer_id}_{channel_id}_remote_balance"
+        local_gauge_name = "channel_local_balance"
+        remote_gauge_name = "channel_remote_balance"
 
         # 只有当 Gauge 还未创建时才创建它
         if local_gauge_name not in gauges:

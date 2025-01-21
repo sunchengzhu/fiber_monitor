@@ -12,6 +12,13 @@ NodeFlask = Flask(__name__)
 default_url = "http://127.0.0.1:8227"
 # 使用命令行参数或默认 URL
 fiber_url = sys.argv[1] if len(sys.argv) > 1 else default_url
+FIBER = CollectorRegistry(auto_describe=False)
+
+# 定义所有全局的Gauges
+channels_gauge = Gauge("graph_channels_count", "Number of graph channels", registry=FIBER)
+nodes_gauge = Gauge("graph_nodes_count", "Number of graph nodes", registry=FIBER)
+peers_count_gauge = Gauge("peers_count", "Number of peers", registry=FIBER)
+channel_count_gauge = Gauge("channel_count", "Number of channels", registry=FIBER)
 
 
 def convert_int(value):
@@ -56,39 +63,12 @@ class RpcGet(object):
             return 0
 
     def list_channels(self):
-        channels_data = self.call("list_channels", [{}])  # 获取通道数据
-        if 'channels' in channels_data:
-            channels_by_peer_id = {}  # 创建字典以根据 peer_id 分组
-            for channel in channels_data['channels']:
-                # 检查通道状态是否为 CHANNEL_READY
-                if channel['state']['state_name'] == "CHANNEL_READY":
-                    peer_id = channel['peer_id']  # 获取当前通道的 peer_id
-                    if peer_id not in channels_by_peer_id:
-                        channels_by_peer_id[peer_id] = {
-                            'all_local_balance': 0,  # 初始化所有本地余额的和
-                            'all_remote_balance': 0  # 初始化所有远程余额的和
-                        }
-                    # 将十六进制的余额转换为整数并累加
-                    channels_by_peer_id[peer_id]['all_local_balance'] += int(channel['local_balance'], 16)
-                    channels_by_peer_id[peer_id]['all_remote_balance'] += int(channel['remote_balance'], 16)
-
-            # 在返回之前将所有余额除以 100000000 并格式化输出为浮点数，保留 8 位小数
-            for peer_id, balances in channels_by_peer_id.items():
-                balances['all_local_balance'] = "{:.8f}".format(balances['all_local_balance'] / 100000000.0)
-                balances['all_remote_balance'] = "{:.8f}".format(balances['all_remote_balance'] / 100000000.0)
-
-            return channels_by_peer_id
-        else:
-            return {}  # 如果没有通道数据，返回一个空字典
+        channels_data = self.call("list_channels", [{}])
+        return channels_data['channels'] if 'channels' in channels_data else []
 
     def call(self, method, params):
         headers = {'content-type': 'application/json'}
-        data = {
-            "id": 42,
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params
-        }
+        data = {"id": 42, "jsonrpc": "2.0", "method": method, "params": params}
         response = requests.post(self.url, data=json.dumps(data), headers=headers).json()
         if 'error' in response.keys():
             error_message = response['error'].get('message', 'Unknown error')
@@ -96,72 +76,43 @@ class RpcGet(object):
         return response.get('result', None)
 
 
+gauges = {}
+
+
 @NodeFlask.route("/metrics")
 def Node_Get():
-    FIBER = CollectorRegistry(auto_describe=False)
-    # Gauge for channels
-    channels_gauge = Gauge(
-        "graph_channels_count",
-        "graph_channels count",
-        [],
-        registry=FIBER
-    )
-    # Gauge for nodes
-    nodes_gauge = Gauge(
-        "graph_nodes_count",
-        "graph_nodes count",
-        [],
-        registry=FIBER
-    )
-    peers_count_gauge = Gauge(
-        "node_info_peers_count",
-        "node_info peers_count",
-        [],
-        registry=FIBER
-    )
-    channel_count_gauge = Gauge(
-        "node_info_channel_count",
-        "node_info channel_count",
-        [],
-        registry=FIBER
-    )
-
     get_result = RpcGet(fiber_url)
 
-    # Set the countber of channels
-    graph_channels_count = get_result.count_channels()
-    channels_gauge.set(graph_channels_count)
-    # Set the countber of nodes
-    graph_nodes_count = get_result.count_nodes()
-    nodes_gauge.set(graph_nodes_count)
+    # 设置通道和节点的计数
+    channels_gauge.set(get_result.count_channels())
+    nodes_gauge.set(get_result.count_nodes())
+    peers_count_gauge.set(get_result.get_peers_count())
+    channel_count_gauge.set(get_result.get_channel_count())
 
-    peers_count = get_result.get_peers_count()
-    peers_count_gauge.set(peers_count)
-    channel_count = get_result.get_channel_count()
-    channel_count_gauge.set(channel_count)
+    # 获取通道数据并设置每个通道的余额指标
+    channels = get_result.list_channels()
 
-    channels_grouped_by_peer_id = get_result.list_channels()
-    gauges_local = {}
-    gauges_remote = {}
+    for channel in channels:
+        peer_id = channel['peer_id']
+        channel_id = channel['channel_id']
+        local_balance = convert_int(channel['local_balance'])
+        remote_balance = convert_int(channel['remote_balance'])
 
-    for peer_id, balances in channels_grouped_by_peer_id.items():
-        # 为每个 peer_id 创建或更新 Gauge
-        if peer_id not in gauges_local:
-            gauges_local[peer_id] = Gauge(
-                f"peer_{peer_id}_local_balance",
-                "Total local balance",
-                registry=FIBER
-            )
-        if peer_id not in gauges_remote:
-            gauges_remote[peer_id] = Gauge(
-                f"peer_{peer_id}_remote_balance",
-                "Total remote balance",
-                registry=FIBER
-            )
+        # 定义唯一的标识符
+        local_gauge_name = f"{peer_id}_{channel_id}_local_balance"
+        remote_gauge_name = f"{peer_id}_{channel_id}_remote_balance"
 
-        # 设置 Gauge 的值
-        gauges_local[peer_id].set(balances['all_local_balance'])
-        gauges_remote[peer_id].set(balances['all_remote_balance'])
+        # 只有当 Gauge 还未创建时才创建它
+        if local_gauge_name not in gauges:
+            gauges[local_gauge_name] = Gauge(local_gauge_name, "Local balance for channel", ['peer_id', 'channel_id'],
+                                             registry=FIBER)
+        if remote_gauge_name not in gauges:
+            gauges[remote_gauge_name] = Gauge(remote_gauge_name, "Remote balance for channel",
+                                              ['peer_id', 'channel_id'], registry=FIBER)
+
+        # 更新 Gauge 的值
+        gauges[local_gauge_name].labels(peer_id=peer_id, channel_id=channel_id).set(local_balance / 100000000.0)
+        gauges[remote_gauge_name].labels(peer_id=peer_id, channel_id=channel_id).set(remote_balance / 100000000.0)
 
     return Response(prometheus_client.generate_latest(FIBER), mimetype="text/plain")
 

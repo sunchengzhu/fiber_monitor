@@ -33,7 +33,7 @@ channels_gauge = Gauge("graph_channels_count", "Number of graph channels", regis
 nodes_gauge = Gauge("graph_nodes_count", "Number of graph nodes", registry=FIBER)
 peers_count_gauge = Gauge("peers_count", "Number of peers", registry=FIBER)
 channel_count_gauge = Gauge("channel_count", "Number of channels", registry=FIBER)
-wallet_ckb_gauge = Gauge('wallet_ckb', 'Total CKB capacity in wallet', registry=FIBER)
+wallet_ckb_gauge = Gauge('wallet_ckb', 'Total CKB capacity in wallet', ['wallet_address'], registry=FIBER)
 wallet_rusd_gauge = Gauge('wallet_rusd', 'Total RUSD capacity in wallet', ['wallet_address'], registry=FIBER)
 
 
@@ -186,7 +186,9 @@ def Node_Get():
     nodes_gauge.set(get_result.count_nodes())
     peers_count_gauge.set(get_result.get_peers_count())
     channel_count_gauge.set(get_result.get_channel_count())
-    wallet_ckb_gauge.set(get_result.get_wallet_ckb(code_hash, args))
+
+    wallet_ckb = get_result.get_wallet_ckb(code_hash, args)
+    wallet_ckb_gauge.labels(wallet_address=addr).set(wallet_ckb)
     wallet_rusd = get_result.get_wallet_rusd(code_hash, args)
     wallet_rusd_gauge.labels(wallet_address=addr).set(wallet_rusd)
 

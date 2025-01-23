@@ -8,10 +8,12 @@ import sys  # 导入 sys 用于读取命令行参数
 
 NodeFlask = Flask(__name__)
 
-# 默认 URL
+# 使用命令行参数或默认 URL 和 args
 default_url = "http://127.0.0.1:8227"
-# 使用命令行参数或默认 URL
+default_args = "0x24ab9e804a1b7f3f303ff54af57e6a0112c72f2a"
 fiber_url = sys.argv[1] if len(sys.argv) > 1 else default_url
+args_value = sys.argv[2] if len(sys.argv) > 2 else default_args
+
 FIBER = CollectorRegistry(auto_describe=False)
 
 # 定义所有全局的Gauges
@@ -19,6 +21,8 @@ channels_gauge = Gauge("graph_channels_count", "Number of graph channels", regis
 nodes_gauge = Gauge("graph_nodes_count", "Number of graph nodes", registry=FIBER)
 peers_count_gauge = Gauge("peers_count", "Number of peers", registry=FIBER)
 channel_count_gauge = Gauge("channel_count", "Number of channels", registry=FIBER)
+wallet_ckb_gauge = Gauge('wallet_ckb', 'Total CKB capacity in wallet', registry=FIBER)
+wallet_rusd_gauge = Gauge('wallet_rusd', 'Total RUSD capacity in wallet', registry=FIBER)
 
 
 def convert_int(value):
@@ -30,9 +34,37 @@ def convert_int(value):
         raise exp
 
 
+def le_to_be(v: str) -> str:
+    # to big endian
+    bytes_str = v[2:]  # Remove '0x' prefix
+    bytes_list = [bytes_str[i:i + 2] for i in range(0, len(bytes_str), 2)]
+    if not bytes_list:
+        return ''
+    be = '0x' + ''.join(reversed(bytes_list))
+    try:
+        # Check if it is a valid hexadecimal
+        int(be, 16)
+        return be
+    except ValueError:
+        raise ValueError('Invalid little-endian hex value')
+
+
+def hex_to_xudt_data(v: str):
+    amount = v[0:34]
+    be_amount = le_to_be(amount)
+    res = {
+        'AMOUNT': int(be_amount, 16)  # Converting the amount to an integer from hex
+    }
+    data = v[34:]
+    if data:
+        res['DATA'] = data
+    return res
+
+
 class RpcGet(object):
     def __init__(self, url):
         self.url = url
+        self.ckb_url = "https://testnet.ckb.dev/indexer"
 
     def count_channels(self):
         channels_data = self.call("graph_channels", [{}])
@@ -66,10 +98,64 @@ class RpcGet(object):
         channels_data = self.call("list_channels", [{}])
         return channels_data['channels'] if 'channels' in channels_data else []
 
-    def call(self, method, params):
-        headers = {'content-type': 'application/json'}
+    def get_wallet_ckb(self, args):
+        params = [{
+            "script": {
+                "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                "hash_type": "type",
+                "args": args
+            },
+            "script_type": "lock"
+        }]
+        response = self.call("get_cells_capacity", params, self.ckb_url)
+        if 'capacity' in response:
+            capacity_value = convert_int(response['capacity']) / 100000000.0
+            return capacity_value
+        else:
+            raise Exception("Error: Unable to retrieve wallet capacity.")
+
+    def get_wallet_rusd(self, args):
+        params = [
+            {
+                "script": {
+                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": args
+                },
+                "script_type": "lock",
+                "script_search_mode": "exact",
+                "filter": {
+                    "script": {
+                        "code_hash": "0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a",
+                        "hash_type": "type",
+                        "args": "0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"
+                    }
+                }
+            },
+            "desc",
+            "0x64"
+        ]
+        response = self.call("get_cells", params, self.ckb_url)
+        if 'objects' in response:
+            total_amount = 0
+            for item in response['objects']:
+                output_data = item.get('output_data', '')
+                if output_data and output_data != "0x00000000000000000000000000000000":
+                    try:
+                        data_details = hex_to_xudt_data(output_data)
+                        total_amount += data_details.get('AMOUNT', 0) / 100000000.0
+                    except Exception as e:
+                        print("Error processing data:", e)
+            return total_amount
+        else:
+            raise Exception("No valid response or missing 'objects' key in response")
+
+    def call(self, method, params, url=None):
+        if not url:
+            url = self.url
+        headers = {'Content-Type': 'application/json'}
         data = {"id": 42, "jsonrpc": "2.0", "method": method, "params": params}
-        response = requests.post(self.url, data=json.dumps(data), headers=headers).json()
+        response = requests.post(url, data=json.dumps(data), headers=headers).json()
         if 'error' in response.keys():
             error_message = response['error'].get('message', 'Unknown error')
             raise Exception(f"Error: {error_message}")
@@ -88,6 +174,8 @@ def Node_Get():
     nodes_gauge.set(get_result.count_nodes())
     peers_count_gauge.set(get_result.get_peers_count())
     channel_count_gauge.set(get_result.get_channel_count())
+    wallet_ckb_gauge.set(get_result.get_wallet_ckb(args_value))
+    wallet_rusd_gauge.set(get_result.get_wallet_rusd(args_value))
 
     if 'fiber_total_ckb' not in gauges:
         gauges['fiber_total_ckb'] = Gauge('fiber_total_ckb', 'Total local CKB balance for all channels', registry=FIBER)

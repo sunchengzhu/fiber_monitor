@@ -5,14 +5,26 @@ from prometheus_client import Gauge
 from prometheus_client.core import CollectorRegistry
 from flask import Response, Flask
 import sys  # 导入 sys 用于读取命令行参数
+from decode_addr import decodeAddress
 
 NodeFlask = Flask(__name__)
 
 # 使用命令行参数或默认 URL 和 args
 default_url = "http://127.0.0.1:8227"
-default_args = "0x24ab9e804a1b7f3f303ff54af57e6a0112c72f2a"
+default_addr = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqfy4w0gqjsm0ulnq0l4ft6hu6spztrj72sjtcnx4"
 fiber_url = sys.argv[1] if len(sys.argv) > 1 else default_url
-args_value = sys.argv[2] if len(sys.argv) > 2 else default_args
+addr = sys.argv[2] if len(sys.argv) > 2 else default_addr
+decode_addr = decodeAddress(addr, "testnet")
+
+if decode_addr:
+    if decode_addr[0] == 'short':
+        code_hash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8"
+        args = decode_addr[2]
+    else:
+        code_hash = decode_addr[1]
+        args = decode_addr[3]
+else:
+    print("Invalid or unsupported address format.")
 
 FIBER = CollectorRegistry(auto_describe=False)
 
@@ -22,7 +34,7 @@ nodes_gauge = Gauge("graph_nodes_count", "Number of graph nodes", registry=FIBER
 peers_count_gauge = Gauge("peers_count", "Number of peers", registry=FIBER)
 channel_count_gauge = Gauge("channel_count", "Number of channels", registry=FIBER)
 wallet_ckb_gauge = Gauge('wallet_ckb', 'Total CKB capacity in wallet', registry=FIBER)
-wallet_rusd_gauge = Gauge('wallet_rusd', 'Total RUSD capacity in wallet', registry=FIBER)
+wallet_rusd_gauge = Gauge('wallet_rusd', 'Total RUSD capacity in wallet', ['wallet_address'], registry=FIBER)
 
 
 def convert_int(value):
@@ -98,12 +110,12 @@ class RpcGet(object):
         channels_data = self.call("list_channels", [{}])
         return channels_data['channels'] if 'channels' in channels_data else []
 
-    def get_wallet_ckb(self, args):
+    def get_wallet_ckb(self, code_hash_value, args_value):
         params = [{
             "script": {
-                "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                "code_hash": code_hash_value,
                 "hash_type": "type",
-                "args": args
+                "args": args_value
             },
             "script_type": "lock"
         }]
@@ -114,13 +126,13 @@ class RpcGet(object):
         else:
             raise Exception("Error: Unable to retrieve wallet capacity.")
 
-    def get_wallet_rusd(self, args):
+    def get_wallet_rusd(self, code_hash_value, args_value):
         params = [
             {
                 "script": {
-                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "code_hash": code_hash_value,
                     "hash_type": "type",
-                    "args": args
+                    "args": args_value
                 },
                 "script_type": "lock",
                 "script_search_mode": "exact",
@@ -174,8 +186,9 @@ def Node_Get():
     nodes_gauge.set(get_result.count_nodes())
     peers_count_gauge.set(get_result.get_peers_count())
     channel_count_gauge.set(get_result.get_channel_count())
-    wallet_ckb_gauge.set(get_result.get_wallet_ckb(args_value))
-    wallet_rusd_gauge.set(get_result.get_wallet_rusd(args_value))
+    wallet_ckb_gauge.set(get_result.get_wallet_ckb(code_hash, args))
+    wallet_rusd = get_result.get_wallet_rusd(code_hash, args)
+    wallet_rusd_gauge.labels(wallet_address=addr).set(wallet_rusd)
 
     if 'fiber_total_ckb' not in gauges:
         gauges['fiber_total_ckb'] = Gauge('fiber_total_ckb', 'Total local CKB balance for all channels', registry=FIBER)

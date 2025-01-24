@@ -36,6 +36,9 @@ channel_count_gauge = Gauge("channel_count", "Number of channels", registry=FIBE
 wallet_ckb_gauge = Gauge('wallet_ckb', 'Total CKB capacity in wallet', ['wallet_address'], registry=FIBER)
 wallet_rusd_gauge = Gauge('wallet_rusd', 'Total RUSD capacity in wallet', ['wallet_address'], registry=FIBER)
 
+fiber_total_ckb_gauge = Gauge('fiber_total_ckb', 'Total local CKB balance for all channels', registry=FIBER)
+fiber_total_rusd_gauge = Gauge('fiber_total_rusd', 'Total local RUSD balance for all channels', registry=FIBER)
+
 
 def convert_int(value):
     try:
@@ -175,11 +178,16 @@ class RpcGet(object):
 
 
 gauges = {}
+# 全局变量，存储活跃通道的详细信息
+global active_channel_details
+active_channel_details = {}
 
 
 @NodeFlask.route("/metrics")
 def Node_Get():
     get_result = RpcGet(fiber_url)
+    channels = get_result.list_channels()
+    current_channel_ids = set()
 
     # 设置通道和节点的计数
     channels_gauge.set(get_result.count_channels())
@@ -192,28 +200,18 @@ def Node_Get():
     wallet_rusd = get_result.get_wallet_rusd(code_hash, args)
     wallet_rusd_gauge.labels(wallet_address=addr).set(wallet_rusd)
 
-    if 'fiber_total_ckb' not in gauges:
-        gauges['fiber_total_ckb'] = Gauge('fiber_total_ckb', 'Total local CKB balance for all channels', registry=FIBER)
-    if 'fiber_total_rusd' not in gauges:
-        gauges['fiber_total_rusd'] = Gauge('fiber_total_rusd', 'Total local RUSD balance for all channels',
-                                           registry=FIBER)
-
-    gauges['fiber_total_ckb'].set(0)  # 重置累积值
-    gauges['fiber_total_rusd'].set(0)
-
-    # 获取通道数据并设置每个通道的余额指标
-    channels = get_result.list_channels()
     total_ckb = 0
     total_rusd = 0
 
+    # 更新或创建当前活跃通道的Gauge
     for channel in channels:
         peer_id = channel['peer_id']
         channel_id = channel['channel_id']
         local_balance = convert_int(channel['local_balance'])
         remote_balance = convert_int(channel['remote_balance'])
         funding_udt_type_script = channel.get('funding_udt_type_script')
-        state_name = channel['state']['state_name']
 
+        state_name = channel['state']['state_name']
         if state_name != "CHANNEL_READY":
             continue  # 如果状态不是 CHANNEL_READY，则跳过
 
@@ -227,21 +225,38 @@ def Node_Get():
             remote_gauge_name = "channel_remote_rusd"
             total_rusd += local_balance / 100000000.0
 
+        # 记录当前活跃的通道ID和详细信息
+        current_channel_ids.add(channel_id)
+        active_channel_details[channel_id] = {
+            'peer_id': peer_id,
+            'local_gauge_name': local_gauge_name,
+            'remote_gauge_name': remote_gauge_name
+        }
         # 只有当 Gauge 还未创建时才创建它
         if local_gauge_name not in gauges:
-            gauges[local_gauge_name] = Gauge(local_gauge_name, "Local balance for channel", ['peer_id', 'channel_id'],
-                                             registry=FIBER)
+            gauges[local_gauge_name] = Gauge(local_gauge_name, "Local balance for channel",
+                                             ['peer_id', 'channel_id'], registry=FIBER)
         if remote_gauge_name not in gauges:
             gauges[remote_gauge_name] = Gauge(remote_gauge_name, "Remote balance for channel",
                                               ['peer_id', 'channel_id'], registry=FIBER)
-
         # 更新 Gauge 的值
         gauges[local_gauge_name].labels(peer_id=peer_id, channel_id=channel_id).set(local_balance / 100000000.0)
         gauges[remote_gauge_name].labels(peer_id=peer_id, channel_id=channel_id).set(remote_balance / 100000000.0)
 
+    # 确定和处理不再活跃的通道
+    inactive_channel_ids = set(active_channel_details.keys()) - current_channel_ids
+    print("Inactive channels: {}".format(inactive_channel_ids))
+    for channel_id in inactive_channel_ids:
+        channel_info = active_channel_details.pop(channel_id, None)
+        if channel_info:
+            gauges[channel_info['local_gauge_name']].labels(peer_id=channel_info['peer_id'],
+                                                            channel_id=channel_id).set(-1)
+            gauges[channel_info['remote_gauge_name']].labels(peer_id=channel_info['peer_id'],
+                                                             channel_id=channel_id).set(-1)
+
     # 更新总累积值
-    gauges['fiber_total_ckb'].set(total_ckb)
-    gauges['fiber_total_rusd'].set(total_rusd)
+    fiber_total_ckb_gauge.set(total_ckb)
+    fiber_total_rusd_gauge.set(total_rusd)
 
     return Response(prometheus_client.generate_latest(FIBER), mimetype="text/plain")
 

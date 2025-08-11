@@ -148,7 +148,7 @@ class RpcGet(object):
                 }
             },
             "desc",
-            "0x64"
+            "0x3e8"
         ]
         response = self.call("get_cells", params, self.ckb_url)
         if 'objects' in response:
